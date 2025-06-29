@@ -1,7 +1,6 @@
 package isolator
 
 import (
-	"context"
 	"fmt"
 	"github.com/Simeon2001/AlpineCell/isolator/utils"
 	"github.com/Simeon2001/AlpineCell/message"
@@ -10,10 +9,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // SpawnContainer initializes and configures a container environment with namespaces, mounts, and networking settings.
@@ -22,10 +19,6 @@ import (
 func SpawnContainer() {
 
 	// log.Println("[✅] Spawning container...")
-
-	// Setup signal handling
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// communication pipe between parent and child
 	childReader := os.NewFile(3, "pipe parent→child (read)")
@@ -133,14 +126,6 @@ func SpawnContainer() {
 	}
 
 	bindDest := filepath.Join(rootfs, mountedProjectDir) // rootfs + mountedProjectDir
-
-	// Handle signals in a goroutine
-	go func() {
-		<-ctx.Done()
-		fmt.Println("\n[!] Received signal, cleaning up inside of the container...")
-		utils.CleanupMounts()
-		os.Exit(0)
-	}()
 
 	// Make mount namespace private
 	must("namespace private mount error: ", unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""))
@@ -374,8 +359,5 @@ func SpawnContainer() {
 	must("seccomp error: ", security.ApplySeccomp(securityConfig.Seccomp))
 
 	must("command Exec error: ", unix.Exec(cmdPath, argv, env))
-
-	// clean after execution
-	utils.CleanupMounts()
 
 }
