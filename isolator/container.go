@@ -186,10 +186,23 @@ func SpawnContainer() {
 	// Set PATH environment for LookPath to work
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
+	// Set working directory and environment for installation
+	env := append(os.Environ(),
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"TERM=xterm",
+		"HOME=/root",
+		"container=otala-runc",
+		"OLDPWD=/",
+		"HOSTNAME=otala-runc",
+		"SHLVL=0",
+		fmt.Sprintf("PWD=%s", mountedProjectDir),
+	)
+
 	// Check for dependency files and set execution commands based on language
 	var execCommand string
 	var execArgs []string
 	var installScript string
+	cwd, _ := os.Getwd()
 
 	if getconfig.Language != "" {
 		var depFile string
@@ -202,7 +215,7 @@ func SpawnContainer() {
 			execArgs = append([]string{getconfig.Script}, getconfig.Args...)
 
 			depFileName = "requirements.txt"
-			depFile = filepath.Join(bindDest, depFileName)
+			depFile = filepath.Join(cwd, depFileName)
 
 			if _, err := os.Stat(depFile); err == nil {
 				log.Printf("Found %s in project directory", depFileName)
@@ -217,20 +230,20 @@ func SpawnContainer() {
 				installScript = "pip3 install -r requirements.txt"
 			}
 
-		case "js":
+		case "javascript":
 			execCommand = "node"
 			execArgs = append([]string{getconfig.Script}, getconfig.Args...)
 
 			// Check for package.json
 			depFileName = "package.json"
-			depFile = filepath.Join(bindDest, depFileName)
+			depFile = filepath.Join(cwd, depFileName)
 
 			if _, err := os.Stat(depFile); err == nil {
 				log.Printf("Found %s in project directory", depFileName)
 				hasDependencies = true
 
 				// Check for lock files to determine package manager
-				yarnLock := filepath.Join(bindDest, "yarn.lock")
+				yarnLock := filepath.Join(cwd, "yarn.lock")
 				if _, err := os.Stat(yarnLock); err == nil {
 					log.Printf("Found yarn.lock in project directory")
 					installScript = "yarn install"
@@ -243,13 +256,13 @@ func SpawnContainer() {
 				must(fmt.Sprintf("Error checking for %s: ", depFileName), err)
 			}
 
-		case "go":
+		case "golang":
 			execCommand = "go"
 			execArgs = append([]string{"run", getconfig.Script}, getconfig.Args...)
 
 			// Check for go.mod
 			depFileName = "go.mod"
-			depFile = filepath.Join(bindDest, depFileName)
+			depFile = filepath.Join(cwd, depFileName)
 
 			if _, err := os.Stat(depFile); err == nil {
 				log.Printf("Found %s in project directory", depFileName)
@@ -257,7 +270,7 @@ func SpawnContainer() {
 				installScript = "go mod download"
 
 				// Also check for go.sum
-				sumFile := filepath.Join(bindDest, "go.sum")
+				sumFile := filepath.Join(cwd, "go.sum")
 				if _, err := os.Stat(sumFile); err == nil {
 					log.Printf("Found go.sum in project directory")
 				}
@@ -277,9 +290,39 @@ func SpawnContainer() {
 
 			switch getconfig.Language {
 			case "python":
-				installCmd = "pip3"
-				installArgs = []string{"install", "-r", "requirements.txt"}
-			case "js":
+				// Create virtual environment first
+				venvPath := "/opt/venv"
+				log.Printf("Creating virtual environment at %s...", venvPath)
+
+				venvCmd := exec.Command("python", "-m", "venv", venvPath)
+				venvCmd.Dir = cwd
+				venvCmd.Env = env
+				venvCmd.Stdout = os.Stdout
+				venvCmd.Stderr = os.Stderr
+
+				err := venvCmd.Run()
+				must("virtual environment creation error: ", err)
+
+				log.Printf("Virtual environment created successfully")
+
+				// Use the virtual environment's pip for installation
+				installCmd = filepath.Join(venvPath, "bin", "pip")
+				installArgs = []string{"install", "--no-cache-dir", "-r", "requirements.txt"}
+
+				// Update PATH to include virtual environment at the beginning
+				for i, envVar := range env {
+					if strings.HasPrefix(envVar, "PATH=") {
+						currentPath := envVar[5:] // Remove "PATH=" prefix
+						env[i] = fmt.Sprintf("PATH=%s/bin:%s", venvPath, currentPath)
+						break
+					}
+				}
+
+				os.Setenv("PATH", fmt.Sprintf("%s/bin:%s", venvPath, os.Getenv("PATH")))
+				env = append(env, fmt.Sprintf("VIRTUAL_ENV=%s", venvPath))
+				env = append(env, "PYTHONHOME=")
+
+			case "javascript":
 				if strings.Contains(installScript, "yarn") {
 					installCmd = "yarn"
 					installArgs = []string{"install"}
@@ -287,7 +330,7 @@ func SpawnContainer() {
 					installCmd = "npm"
 					installArgs = []string{"install"}
 				}
-			case "go":
+			case "golang":
 				installCmd = "go"
 				installArgs = []string{"mod", "download"}
 			}
@@ -296,27 +339,9 @@ func SpawnContainer() {
 			installCmdPath, err := exec.LookPath(installCmd)
 			must("install command path error: ", err)
 
-			// Build install argv
-			installArgv := append([]string{installCmdPath}, installArgs...)
-
-			// Set working directory and environment for installation
-			env := append(os.Environ(),
-				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-				"TERM=xterm",
-				"HOME=/root",
-				"container=otala-runc",
-				"OLDPWD=/",
-				"HOSTNAME=otala-runc",
-				"SHLVL=0",
-				fmt.Sprintf("PWD=%s", bindDest),
-			)
-
-			// Change to project directory
-			must("chdir error: ", os.Chdir(bindDest))
-
 			// Execute installation command
-			cmd := exec.Command(installCmdPath, installArgv...)
-			cmd.Dir = bindDest
+			cmd := exec.Command(installCmdPath, installArgs...)
+			cmd.Dir = cwd
 			cmd.Env = env
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -336,6 +361,9 @@ func SpawnContainer() {
 
 	}
 
+	var finalCmdPath string
+	var finalArgv []string
+
 	// Look up the command path
 	cmdPath, err := exec.LookPath(execCommand)
 	must("cmdpath error: ", err)
@@ -343,21 +371,51 @@ func SpawnContainer() {
 	// Build argv with the command and its arguments
 	argv := append([]string{cmdPath}, execArgs...)
 
-	// Build the command with the full path and args
-	env := append(os.Environ(),
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"TERM=xterm",
-		"HOME=/root",
-		"container=otala-runc",
-		"OLDPWD=/",
-		"HOSTNAME=otala-runc",
-		"SHLVL=0",
-		fmt.Sprintf("PWD=%s", mountedProjectDir),
-	)
+	fullCommandString := cmdPath + " " + strings.Join(execArgs, " ")
+
+	// Define the set of characters that require a shell for interpretation.
+	specialChars := []string{"|", ">", "<", "&&", "||", ";"}
+	needsShell := false
+
+	// Check if any part of the command string contains special shell characters.
+	for _, char := range specialChars {
+		if strings.Contains(fullCommandString, char) {
+			needsShell = true
+			break
+		}
+	}
+
+	if execCommand == "sh" && len(execArgs) > 0 && strings.HasPrefix(execArgs[0], "-c ") {
+		fmt.Println("💡 Detected 'sh -c' pattern. Preparing command for shell execution.")
+		commandToRun := strings.TrimPrefix(execArgs[0], "-c ")
+
+		// If there are more '-a' flags, append them to the command string.
+		if len(execArgs) > 1 {
+			commandToRun += " " + strings.Join(execArgs[1:], " ")
+		}
+
+		finalCmdPath, err = exec.LookPath("sh")
+		must("Could not find 'sh' in PATH", err)
+
+		// The final argument vector for exec must be: ["sh", "-c", "your full command"]
+		finalArgv = []string{"sh", "-c", commandToRun}
+
+	} else if needsShell {
+		fmt.Println("💡 Detected shell operators (e.g., '|', '>'). Wrapping command in 'sh -c'.")
+
+		finalCmdPath, err = exec.LookPath("sh")
+		must("Could not find 'sh' in PATH", err)
+
+		finalArgv = []string{"sh", "-c", fullCommandString}
+	} else {
+		fmt.Println("✔️ No shell wrapping needed. Preparing for direct execution.")
+		finalCmdPath = cmdPath
+		finalArgv = argv
+	}
 
 	must("capabilities error: ", security.ApplyCapabilities(securityConfig.Capabilities))
 	must("seccomp error: ", security.ApplySeccomp(securityConfig.Seccomp))
 
-	must("command Exec error: ", unix.Exec(cmdPath, argv, env))
+	must("command Exec error: ", unix.Exec(finalCmdPath, finalArgv, env))
 
 }
