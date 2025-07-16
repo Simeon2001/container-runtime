@@ -196,7 +196,10 @@ func runContainer(ctx context.Context, cmd *cli.Command) error {
 	return executeContainer(&config)
 }
 
+// validateConfig validate all input pass to the CLI
 func validateConfig(config *runConfig.RunConfig) error {
+
+	var copyOrMountPath string
 	// Validate config file exists (only if ConfigPath is provided)
 	if config.ConfigPath != "" {
 		if _, err := os.Stat(config.ConfigPath); os.IsNotExist(err) {
@@ -211,31 +214,6 @@ func validateConfig(config *runConfig.RunConfig) error {
 
 	if config.Script == "" && config.Command == "" {
 		return fmt.Errorf("must specify either --script or --command")
-	}
-
-	// If using script, validate script file exists and language is provided
-	if config.Script != "" {
-		if _, err := os.Stat(config.Script); os.IsNotExist(err) {
-			return fmt.Errorf("script file does not exist: %s", config.Script)
-		}
-
-		if config.Language == "" {
-			return fmt.Errorf("--language is required when using --script")
-		}
-
-		// Validate supported languages
-		supportedLangs := map[string]bool{
-			"javascript": true,
-			"python":     true,
-			"go":         true,
-			"rust":       true,
-			"java":       true,
-			"bash":       true,
-		}
-
-		if !supportedLangs[strings.ToLower(config.Language)] {
-			return fmt.Errorf("unsupported language: %s", config.Language)
-		}
 	}
 
 	// Must specify either copy or mount, but not both
@@ -259,6 +237,7 @@ func validateConfig(config *runConfig.RunConfig) error {
 			return fmt.Errorf("copy path does not exist: %s", config.CopyMounts)
 		}
 		config.MountBool = false
+		copyOrMountPath = config.CopyMounts
 	}
 
 	// Validate mount paths (host paths only)
@@ -270,6 +249,33 @@ func validateConfig(config *runConfig.RunConfig) error {
 			return fmt.Errorf("mount path does not exist: %s", config.Mounts)
 		}
 		config.MountBool = true
+		copyOrMountPath = config.Mounts
+	}
+
+	// If using script, validate script file exists and language is provided
+	if config.Script != "" {
+		fullScriptPath := filepath.Join(copyOrMountPath, config.Script)
+		if _, err := os.Stat(fullScriptPath); os.IsNotExist(err) {
+			return fmt.Errorf("script file does not exist: %s at this dir: %s", config.Script, fullScriptPath)
+		}
+
+		if config.Language == "" {
+			return fmt.Errorf("--language is required when using --script")
+		}
+
+		// Validate supported languages
+		supportedLangs := map[string]bool{
+			"javascript": true,
+			"python":     true,
+			"golang":     true,
+			"rust":       true,
+			"java":       true,
+			"bash":       true,
+		}
+
+		if !supportedLangs[strings.ToLower(config.Language)] {
+			return fmt.Errorf("unsupported language: %s", config.Language)
+		}
 	}
 
 	return nil
@@ -283,53 +289,11 @@ func executeContainer(config *runConfig.RunConfig) error {
 	switch os.Args[1] {
 	case "run":
 		InitProcess(&configJSONFile, &alpineFS, config)
-	//case "child":
-	//	isolator.SpawnContainer()
 
-	//case "child":
-	//	containerInitProcess()
 	default:
 		panic("unknown command")
 	}
 
-	if config.Network {
-		color.New(color.FgWhite).Println("🌐 Configuring pasta networking...")
-	} else {
-		color.New(color.FgYellow).Println("🔒 Networking disabled for maximum isolation...")
-	}
-
-	color.New(color.FgWhite).Printf("🧠 Memory limit set to %dMB\n", config.MemoryLimit)
-	color.New(color.FgWhite).Println("📁 Mounting volumes...")
-
-	if config.Script != "" {
-		if len(config.Args) > 0 {
-			color.New(color.FgCyan).Printf("⚡ Executing %s script: %s with args: [%s]...\n",
-				config.Language, config.Script, strings.Join(config.Args, ", "))
-		} else {
-			color.New(color.FgCyan).Printf("⚡ Executing %s script: %s...\n", config.Language, config.Script)
-		}
-	} else if config.Command != "" {
-		if len(config.Args) > 0 {
-			color.New(color.FgCyan).Printf("⚡ Executing command: %s with args: [%s]...\n",
-				config.Command, strings.Join(config.Args, ", "))
-		} else {
-			color.New(color.FgCyan).Printf("⚡ Executing command: %s...\n", config.Command)
-		}
-	}
-
-	// TODO: Replace with actual container execution logic
-	// You now have the complete config struct with all validated values:
-	// - config.Network (bool): true for pasta networking, false for no network
-	// - config.MemoryLimit (int): memory limit in MB
-	// - config.ConfigPath (string): path to config JSON
-	// - config.CopyMounts ([]string): slice of host paths to copy into container
-	// - config.Mounts ([]string): slice of host paths to mount into container
-	// - config.Language (string): validated runtime language (only if using script)
-	// - config.Script (string): validated script path (mutually exclusive with command)
-	// - config.Command (string): direct command to execute (mutually exclusive with script)
-	// - config.Args ([]string): arguments to pass to the script/command
-
-	color.New(color.FgGreen, color.Bold).Println("✅ Container execution completed successfully")
 	return nil
 }
 
